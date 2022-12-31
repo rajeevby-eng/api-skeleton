@@ -2,13 +2,7 @@ from src.extensions import db
 from src.models import AppointmentModel, ProviderModel
 from datetime import time
 
-"""
-NINE_AM = time(9, 0, 0).strftime("%H:%M:%S").strip()
-TEN_AM = time(10, 0, 0).strftime("%H:%M:%S").strip()
-FIVE_PM = time(17, 0, 0).strftime("%H:%M:%S").strip()
-EIGHT_PM = time(20, 0, 0).strftime("%H:%M:%S").strip()
-SATURDAY_DAY_OF_WEEK = 6
-"""
+
 NINE_AM = time(9, 0, 0)
 TEN_AM = time(10, 0, 0)
 FIVE_PM = time(17, 0, 0)

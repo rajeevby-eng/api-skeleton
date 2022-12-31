@@ -89,6 +89,7 @@ def first_available(args):
     start_time = datetime.strptime(args.get('start_time'), '%Y-%m-%d %H:%M:%S')
     duration = args.get('duration')
     first_available = AppointmentModel.firstAvailable(start_time, duration)
+    print('first_available: ', first_available)
     return make_response(jsonify(first_available), HTTPStatus.OK)
 
 # This error handler is necessary for usage with Flask-RESTful
