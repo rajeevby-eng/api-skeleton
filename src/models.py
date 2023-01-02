@@ -1,13 +1,16 @@
 from __future__ import annotations
 from src.extensions import db
 from flask import jsonify
-from sqlalchemy import and_, or_, not_, cast, Date, Time, orm, union, func, literal
+from sqlalchemy import and_, or_, not_, cast, Date, Time, orm, union, func, literal, union_all, String
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.functions import coalesce
 from datetime import datetime, timedelta
 import json
 from typing import List
 
+
+def python_to_sql_weekday(weekday: int) -> int:
+    return (weekday + 1) % 7
     
 class ProviderModel(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -79,7 +82,7 @@ class AppointmentModel(db.Model):
             FROM AvailabilityModel a
             WHERE EXTRACT(DOW FROM TIMESTAMP start_time_value) == a.day_of_week AND
                   a.start_time <= start_time_value AND
-                  end_time_value < a.end_time AND
+                  end_time_value <= a.end_time AND
                   a.provider_id = provider_id)
             AND NOT EXISTS(
                 SELECT id
@@ -93,7 +96,6 @@ class AppointmentModel(db.Model):
         """
         availability_query = AvailabilityModel.availabilityQuery(provider_id, start_time, end_time)
         appointment_query = AppointmentModel.availabilityQuery(provider_id, start_time, end_time)
-
         return db.session.query(
             and_(availability_query.exists(), not_(appointment_query.exists()))
             ).scalar()
@@ -101,7 +103,7 @@ class AppointmentModel(db.Model):
     @staticmethod
     def appointments(provider_id, start_time, end_time) -> orm.Query:
         query = db.session.query(AppointmentModel) \
-            .filter(start_time < AppointmentModel.end_time) \
+            .filter(start_time <= AppointmentModel.end_time) \
             .filter(AppointmentModel.start_time < end_time) \
             .filter(AppointmentModel.provider_id == provider_id)
         return query
@@ -110,21 +112,119 @@ class AppointmentModel(db.Model):
     def firstAvailableQuery(start_time, duration_in_minutes) -> orm.Query:
         end_time = start_time + timedelta(minutes=duration_in_minutes)
         
-        appointment_model = aliased(AppointmentModel)
+        earliest_start_query = db.session.query(AvailabilityModel.provider_id.label('provider_id'),
+                                                   func.min(func.datetime(func.datetime(func.date(start_time, '+' + cast((AvailabilityModel.day_of_week - start_time.weekday() + 7) % 7, String) + ' days'), AvailabilityModel.start_time))).label('start_time')) \
+                                            .filter(start_time <= func.datetime(func.datetime(func.date(start_time, '+' + cast((AvailabilityModel.day_of_week - start_time.weekday() + 7) % 7, String) + ' days'), AvailabilityModel.start_time))) \
+                                            .group_by(AvailabilityModel.provider_id) \
+                                            .subquery()
+        availability_model_start = aliased(AvailabilityModel)
+        availability_model_next = aliased(AvailabilityModel)
+        availability_model_next_next = aliased(AvailabilityModel)
+        
+        dummy_start_query = db.session.query(AvailabilityModel.provider_id.label('provider_id'),
+                                       func.datetime(func.max(start_time, func.min(coalesce(AppointmentModel.start_time,
+                                                                       func.datetime(func.date(start_time), availability_model_start.start_time),
+                                                                       func.datetime(func.date(start_time, '+1 day'), availability_model_next.start_time),
+                                                                       func.datetime(func.date(start_time, '+2 day'), availability_model_next_next.start_time)))),
+                                                                        "+" + str(duration_in_minutes) + " minutes").label('start_time'),
+                                       func.datetime(func.max(start_time, func.min(coalesce(AppointmentModel.start_time,
+                                                                       func.datetime(func.date(start_time), availability_model_start.start_time),
+                                                                       func.datetime(func.date(start_time, '+1 day'), availability_model_next.start_time),
+                                                                       func.datetime(func.date(start_time, '+2 day'), availability_model_next_next.start_time)))),
+                                                                        "+" + str(duration_in_minutes) + " minutes").label('end_time')) \
+                                      .outerjoin(availability_model_start,
+                                              and_(availability_model_start.provider_id == AvailabilityModel.provider_id,
+                                                   availability_model_start.day_of_week == func.strftime('%w', start_time))) \
+                                      .outerjoin(availability_model_next,
+                                              and_(availability_model_next.provider_id == AvailabilityModel.provider_id,
+                                                   availability_model_next.day_of_week == (func.strftime('%w', start_time) + 1)%7)) \
+                                      .outerjoin(availability_model_next_next,
+                                              and_(availability_model_next_next.provider_id == AvailabilityModel.provider_id,
+                                                   availability_model_next_next.day_of_week == (func.strftime('%w', start_time) + 2)%7)) \
+                                      .outerjoin(AppointmentModel,
+                                                 and_(AppointmentModel.provider_id == AvailabilityModel.provider_id,
+                                                      AvailabilityModel.day_of_week == (func.strftime('%w', AppointmentModel.start_time)))) \
+                                      .group_by(AvailabilityModel.provider_id)
+        dummy_end_query = db.session.query(AvailabilityModel.provider_id.label('provider_id'),
+                                       func.datetime(func.max(start_time, func.max(coalesce(AppointmentModel.start_time,
+                                                                       func.datetime(func.date(start_time), availability_model_start.start_time),
+                                                                       func.datetime(func.date(start_time, '+1 day'), availability_model_next.start_time),
+                                                                       func.datetime(func.date(start_time, '+2 day'), availability_model_next_next.start_time)))),
+                                                                        "+" + str(duration_in_minutes) + " minutes").label('start_time'),
+                                       func.datetime(func.max(start_time, func.max(coalesce(AppointmentModel.start_time,
+                                                                       func.datetime(func.date(start_time), availability_model_start.start_time),
+                                                                       func.datetime(func.date(start_time, '+1 day'), availability_model_next.start_time),
+                                                                       func.datetime(func.date(start_time, '+2 day'), availability_model_next_next.start_time)))),
+                                                                        "+" + str(duration_in_minutes) + " minutes").label('end_time')) \
+                                      .outerjoin(availability_model_start,
+                                              and_(availability_model_start.provider_id == AvailabilityModel.provider_id,
+                                                   availability_model_start.day_of_week == func.strftime('%w', start_time))) \
+                                      .outerjoin(availability_model_next,
+                                              and_(availability_model_next.provider_id == AvailabilityModel.provider_id,
+                                                   availability_model_next.day_of_week == (func.strftime('%w', start_time) + 1)%7)) \
+                                      .outerjoin(availability_model_next_next,
+                                              and_(availability_model_next_next.provider_id == AvailabilityModel.provider_id,
+                                                   availability_model_next_next.day_of_week == (func.strftime('%w', start_time) + 2)%7)) \
+                                      .outerjoin(AppointmentModel,
+                                                 and_(AppointmentModel.provider_id == AvailabilityModel.provider_id,
+                                                      AvailabilityModel.day_of_week == (func.strftime('%w', AppointmentModel.start_time)))) \
+                                      .group_by(AvailabilityModel.provider_id)
+                                              
+        appointment_model_query = db.session.query(AppointmentModel.provider_id.label('provider_id'),
+                                                      AppointmentModel.start_time.label('start_time'),
+                                                      AppointmentModel.end_time.label('end_time'))
+        appointments_subquery = appointment_model_query.union(dummy_start_query, dummy_end_query).subquery()
+        
+                
         availability_model = aliased(AvailabilityModel)
         
-        enum_subquery = db.session.query(appointment_model.provider_id,
-                                         func.max(start_time, func.lag(appointment_model.end_time).over(order_by=appointment_model.start_time)).label('previous_end_time'),
-                                         appointment_model.start_time) \
-                        .join(availability_model, 
-                              and_(availability_model.provider_id == appointment_model.provider_id,
-                                   availability_model.day_of_week == func.strftime('%w', appointment_model.end_time))) \
-                        .subquery()
+        previous_end_subquery = db.session.query(appointments_subquery.c.provider_id,
+                                                 func.lag(appointments_subquery.c.end_time, 1, func.max(start_time, func.datetime(func.date(appointments_subquery.c.end_time), availability_model.start_time))).over(
+                                                     order_by=appointments_subquery.c.start_time,
+                                                     partition_by=appointments_subquery.c.provider_id).label('previous_end_time'),
+                                                 func.lag(func.date(func.datetime(appointments_subquery.c.end_time, '+1 day')), 1, func.date(start_time, '+1 day')).over(
+                                                     order_by=appointments_subquery.c.start_time,
+                                                     partition_by=appointments_subquery.c.provider_id).label('next_day'),
+                                                 func.lag(func.date(func.datetime(appointments_subquery.c.end_time, '+2 days')), 1, func.date(start_time, '+2 day')).over(
+                                                     order_by=appointments_subquery.c.start_time,
+                                                     partition_by=appointments_subquery.c.provider_id).label('next_next_day'),
+                                                 appointments_subquery.c.start_time,
+                                                 appointments_subquery.c.end_time,
+                                                 availability_model.day_of_week.label('day_of_week')) \
+                                            .join(availability_model, 
+                                                  and_(availability_model.provider_id == appointments_subquery.c.provider_id,
+                                                       availability_model.day_of_week == (func.strftime('%w', appointments_subquery.c.end_time)))) \
+                                            .filter(start_time <= appointments_subquery.c.end_time) \
+                                            .subquery()
+        sameday_query = db.session.query(previous_end_subquery.c.provider_id.label('provider_id'),
+                                         previous_end_subquery.c.previous_end_time.label('start_time')) \
+                                    .join(AvailabilityModel, 
+                                          and_(AvailabilityModel.provider_id == previous_end_subquery.c.provider_id,
+                                               AvailabilityModel.day_of_week == previous_end_subquery.c.day_of_week)) \
+                                    .filter(func.datetime(previous_end_subquery.c.previous_end_time, "+" + str(duration_in_minutes) + " minutes") <= previous_end_subquery.c.start_time) \
+                                    .filter(AvailabilityModel.start_time <= func.time(previous_end_subquery.c.previous_end_time)) \
+                                    .filter(func.datetime(previous_end_subquery.c.previous_end_time, "+" + str(duration_in_minutes) + " minutes") <= (func.datetime(func.date(previous_end_subquery.c.previous_end_time), AvailabilityModel.end_time))) \
+                                    .group_by(previous_end_subquery.c.provider_id) \
         
-        enum_query = db.session.query(enum_subquery.c.provider_id.label('provider_id'), enum_subquery.c.previous_end_time.label('start_time')) \
-                    .filter((enum_subquery.c.start_time >= (enum_subquery.c.previous_end_time + 60*duration_in_minutes))) \
-                    .order_by(enum_subquery.c.start_time) \
-                    .limit(1)
+        next_query = db.session.query(previous_end_subquery.c.provider_id.label('provider_id'),
+                                      func.datetime(previous_end_subquery.c.next_day, availability_model.start_time).label('start_time')) \
+                                .join(AvailabilityModel, 
+                                      and_(AvailabilityModel.provider_id == previous_end_subquery.c.provider_id,
+                                           AvailabilityModel.day_of_week == (previous_end_subquery.c.day_of_week + 1) % 7)) \
+                                .group_by(previous_end_subquery.c.provider_id)
+
+        next_next_query = db.session.query(previous_end_subquery.c.provider_id.label('provider_id'),
+                                           func.datetime(previous_end_subquery.c.next_next_day, availability_model.start_time).label('start_time')) \
+                                    .join(AvailabilityModel, 
+                                          and_(AvailabilityModel.provider_id == previous_end_subquery.c.provider_id,
+                                               AvailabilityModel.day_of_week == (previous_end_subquery.c.day_of_week + 2) % 7)) \
+                                    .filter(func.datetime(func.datetime(previous_end_subquery.c.next_day, availability_model.start_time), "+" + str(duration_in_minutes) + " minutes") <= previous_end_subquery.c.start_time) \
+                                    .filter(func.time(AvailabilityModel.start_time, "+" + str(duration_in_minutes) + " minutes") <= AvailabilityModel.end_time) \
+                                    .group_by(previous_end_subquery.c.provider_id)
+
+        enum_query = sameday_query.union(next_query, next_next_query) \
+                                    .order_by('start_time') \
+                                    .limit(1)
 
         return enum_query
 
@@ -135,16 +235,14 @@ class AppointmentModel(db.Model):
             return None
         
         first_available = AppointmentModel.firstAvailableQuery(start_time, duration_in_minutes).first()
-        if first_available:
-            return dict(first_available)
-        else:
-            provider = db.session.query(ProviderModel).first()
-            return dict(provider_id=provider.id, start_time=start_time)
+        provider = db.session.query(ProviderModel).filter(ProviderModel.id == first_available.provider_id).first()
+        formatted_datetime = datetime.strptime(first_available.start_time[:-7] if '.' in first_available.start_time else first_available.start_time, '%Y-%m-%d %H:%M:%S').isoformat()
+        return dict(provider_name=provider.last_name, start_time=formatted_datetime)
         
     
     def serialize(self) -> Dict:
-        return {'provider': self.provider.last_name,
-                'start_time': self.start_time, 'end_time': self.end_time,
+        return {'provider_name': self.provider.last_name,
+                'start_time': self.start_time.isoformat(), 'end_time': self.end_time.isoformat(),
                 'first_name': self.first_name, 'last_name': self.last_name}
     def json(self) -> str:
         """
@@ -164,17 +262,16 @@ class AvailabilityModel(db.Model):
     @staticmethod
     def availabilityQuery(provider_id, start_time, end_time) -> orm.Query:
         query = db.session.query(AvailabilityModel) \
-            .filter(start_time.weekday() == AvailabilityModel.day_of_week) \
+            .filter(python_to_sql_weekday(start_time.weekday()) == AvailabilityModel.day_of_week) \
             .filter(AvailabilityModel.start_time <= start_time.time()) \
-            .filter(end_time.time() < AvailabilityModel.end_time)
-        if provider_id is not None:
-            query.filter(AvailabilityModel.provider_id == provider_id)
+            .filter(end_time.time() <= AvailabilityModel.end_time) \
+            .filter(AvailabilityModel.provider_id == provider_id)
         return query
 
     def serialize(self) -> Dict:
-        return {'provider': self.provider.last_name,
+        return {'provider_name': self.provider.last_name,
                 'day_of_week': self.day_of_week,
-                'start_time': self.start_time, 'end_time': self.end_time}
+                'start_time': self.start_time.isoformat(), 'end_time': self.end_time.isoformat()}
         
     def json(self) -> str:
         """

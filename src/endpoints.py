@@ -30,6 +30,12 @@ appointments_args = {
     "end_time": fields.DateTime(required=True)
 }
 
+first_available_args = {
+    # Required arguments
+    "start_time": fields.DateTime(required=True),
+    "duration": fields.Int(required=True)
+}
+
 
 @home.route('/')
 def index():
@@ -52,6 +58,7 @@ def appointment_model_create(provider_name, start_time, end_time, first_name, la
     provider = ProviderModel.provider(provider_name)
     if not provider:
         return jsonify(None), HTTPStatus.NOT_FOUND
+    print("create: provider id = ", provider.id)
     if not AppointmentModel.isAvailable(provider.id, start_time, end_time):
         return jsonify(None), HTTPStatus.FORBIDDEN
     new_record = AppointmentModel(
@@ -66,12 +73,9 @@ def appointment_model_create(provider_name, start_time, end_time, first_name, la
 
 
 @home.route('/appointment_model/appointments', methods=['GET'])
-@parser.use_args({"provider_name": fields.Str(required=True), "start_time": fields.Str(required=True), "end_time": fields.Str(required=True)}, location="query")
-def appointments(args):
-    print("appointments: ", args)
-    provider_name = args.get('provider_name')
-    start_time = datetime.strptime(args.get('start_time'), '%Y-%m-%d %H:%M:%S')
-    end_time = datetime.strptime(args.get('end_time'), '%Y-%m-%d %H:%M:%S')
+@use_kwargs(appointments_args, location="query")
+def appointments(provider_name, start_time, end_time):
+    print("appointments: ", provider_name, start_time, end_time)
     provider = ProviderModel.provider(provider_name)
     if not provider:
         return jsonify(None), HTTPStatus.NOT_FOUND
@@ -80,22 +84,28 @@ def appointments(args):
     serialized_appointments = []
     for appointment in appointments:
         serialized_appointments.append(appointment.serialize())
-    return make_response(jsonify(appointments=serialized_appointments), HTTPStatus.OK)
+    response = make_response(jsonify(appointments=serialized_appointments), HTTPStatus.OK)
+    print("appointments response: ", response)
+    return response
 
 @home.route('/appointment_model/first_available', methods=['GET'])
-@parser.use_args({"start_time": fields.Str(required=True), "duration": fields.Int(required=True)}, location="query")
-def first_available(args):
-    print("first_available: ", args)
-    start_time = datetime.strptime(args.get('start_time'), '%Y-%m-%d %H:%M:%S')
-    duration = args.get('duration')
+@use_kwargs(first_available_args, location="query")
+def first_available(start_time, duration):
+    print("first_available: ", start_time, duration)
     first_available = AppointmentModel.firstAvailable(start_time, duration)
     print('first_available: ', first_available)
     return make_response(jsonify(first_available), HTTPStatus.OK)
 
-# This error handler is necessary for usage with Flask-RESTful
-@parser.error_handler
-def handle_request_parsing_error(err, req, schema, *, error_status_code, error_headers):
-    """webargs error handler that uses Flask-RESTful's abort function to return
-    a JSON error response to the client.
-    """
-    abort(error_status_code, errors=err.messages)
+@home.errorhandler(422)
+@home.errorhandler(400)
+def handle_error(err):
+    headers = err.data.get("headers", None)
+    messages = err.data.get("messages", ["Invalid request."])
+    if messages:
+        if headers:
+            return jsonify({"errors": messages}), err.code, headers
+        else:
+            return jsonify({"errors": messages}), err.code
+    else:
+        return jsonify(None), err.code
+

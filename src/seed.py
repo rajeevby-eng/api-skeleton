@@ -1,5 +1,5 @@
 from src.extensions import db
-from src.models import AppointmentModel, ProviderModel
+from src.models import AppointmentModel, AvailabilityModel, ProviderModel
 from datetime import time
 
 
